@@ -1,2 +1,2 @@
-os-shell/shell
-os-shell/shell.o
+shell/shell
+shell/shell.o

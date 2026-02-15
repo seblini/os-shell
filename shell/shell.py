@@ -58,7 +58,7 @@ def parse(tokens):
         if programs[-1].cmd == "":
             match(token):
                 case TokenType.EXIT:
-                    programs[-1].cmd = TokenType.EXIT.value
+                    programs[-1].cmd = str(TokenType.EXIT)
                 case TokenType.PIPE | TokenType.REDIRECT_IN | TokenType.REDIRECT_OUT | TokenType.BACKGROUND:
                     programs[-1].error=f"Invalid command: {token}"
                 case _:
@@ -66,33 +66,31 @@ def parse(tokens):
                     programs[-1].args.append(token)
 
         # add output redirection file
-        elif programs[-1].output == IOType.FILE_OUT and programs[-1].out_file == "":
-            match(token):
-                case TokenType.PIPE | TokenType.REDIRECT_IN | TokenType.REDIRECT_OUT | TokenType.BACKGROUND:
-                    programs[-1].error=f"Syntax error: unexpected token: {token}"
-                case _:
-                    programs[-1].out_file = str(token)
+        elif programs[-1].output == IOType.FILE_OUT:
+            if programs[-1].out_file == "":
+                match(token):
+                    case TokenType.PIPE | TokenType.REDIRECT_IN | TokenType.REDIRECT_OUT | TokenType.BACKGROUND:
+                        programs[-1].error=f"Syntax error: unexpected token: {token}"
+                    case _:
+                        programs[-1].out_file = str(token)
+            elif token != TokenType.BACKGROUND:
+                programs[-1].error=f"Syntax error: unexpected token: {token}"
+            else:
+                populate_background_group(programs, background_group)
+                background_group += 1
+                programs.append(Program(cmd="", args=[]))
 
         # add input redirection file
-        elif programs[-1].input == IOType.FILE_IN and programs[-1].in_file == "":
-            match(token):
-                case TokenType.PIPE | TokenType.REDIRECT_IN | TokenType.REDIRECT_OUT | TokenType.BACKGROUND:
-                    programs[-1].error=f"Syntax error: unexpected token: {token}"
-                case _:
-                    programs[-1].in_file = str(token)
-
-        else:
-            # catch unexpected tokens after output redirect
-            if programs[-1].output != IOType.STD_OUT:
-                if token != TokenType.BACKGROUND.value:
-                    programs[-1].error=f"Syntax error: unexpected token: {token}"
-                else:
-                    populate_background_group(programs, background_group)
-                    background_group += 1
-                    programs.append(Program(cmd="", args=[]))
+        elif programs[-1].input == IOType.FILE_IN: 
+            if programs[-1].in_file == "":
+                match(token):
+                    case TokenType.PIPE | TokenType.REDIRECT_IN | TokenType.REDIRECT_OUT | TokenType.BACKGROUND:
+                        programs[-1].error=f"Syntax error: unexpected token: {token}"
+                    case _:
+                        programs[-1].in_file = str(token)
 
             # catch unexpected tokens after input redirect
-            elif programs[-1].input != IOType.STD_IN:
+            else:
                 match(token):
                     case TokenType.PIPE:
                         programs[-1].output = IOType.PIPE_OUT
@@ -107,21 +105,21 @@ def parse(tokens):
                         programs[-1].error=f"Syntax error: unexpected token: {token}"
 
             # add args, handle redir and background
-            else:
-                match(token):
-                    case TokenType.PIPE:
-                        programs[-1].output = IOType.PIPE_OUT
-                        programs.append(Program(cmd="", args=[], input=IOType.PIPE_IN))
-                    case TokenType.REDIRECT_IN:
-                        programs[-1].input = IOType.FILE_IN
-                    case TokenType.REDIRECT_OUT:
-                        programs[-1].output = IOType.FILE_OUT
-                    case TokenType.BACKGROUND:
-                        populate_background_group(programs, background_group)
-                        background_group += 1
-                        programs.append(Program(cmd="", args=[]))
-                    case _:
-                        programs[-1].args.append(token)
+        else:
+            match(token):
+                case TokenType.PIPE:
+                    programs[-1].output = IOType.PIPE_OUT
+                    programs.append(Program(cmd="", args=[], input=IOType.PIPE_IN))
+                case TokenType.REDIRECT_IN:
+                    programs[-1].input = IOType.FILE_IN
+                case TokenType.REDIRECT_OUT:
+                    programs[-1].output = IOType.FILE_OUT
+                case TokenType.BACKGROUND:
+                    populate_background_group(programs, background_group)
+                    background_group += 1
+                    programs.append(Program(cmd="", args=[]))
+                case _:
+                    programs[-1].args.append(token)
 
     return programs
 
@@ -139,32 +137,65 @@ def main():
 
         programs = parse(tokens)
 
-        if programs[-1].error != "":
-            print(programs[-1].error)
-            sys.exit(1)
+        if programs[-1].cmd == "":
+            programs.pop()
 
-        if programs[-1].cmd == TokenType.EXIT.value:
-            sys.exit(0)
+        pipes = [(-1, -1)] * len(programs)
 
-        if programs[-1].cmd == "cd":
-            if len(programs[-1].args) != 2:
-                print(f"usage: cd <dir>")
+        for i, program in enumerate(programs):
+            if program.error != "":
+                print(programs[-1].error)
                 sys.exit(1)
 
-            os.chdir(programs[-1].args[0])
-            continue
+            if program.cmd == str(TokenType.EXIT):
+                sys.exit(0)
 
-        rc = os.fork()
-        if rc == 0:
-            if programs[-1].in_file != "":
-                os.dup2(os.open(programs[-1].in_file, os.O_RDONLY), 0)
-            if programs[-1].out_file != "":
-                os.dup2(os.open(programs[-1].out_file, os.O_WRONLY|os.O_CREAT|os.O_TRUNC), 1)
-            os.execve(programs[-1].cmd, programs[-1].args, env)
-        else:
-            os.waitpid(rc, 0)
-    
+            if program.cmd == "cd":
+                if len(programs[-1].args) != 2:
+                    print(f"usage: cd <dir>")
+                    sys.exit(1)
 
+                os.chdir(program.args[1])
+                continue
+
+            if program.output == IOType.PIPE_OUT:
+                pipes[i] = os.pipe()
+
+            rc = os.fork()
+            # child
+            if rc == 0:
+                if program.input == IOType.FILE_IN:
+                    os.dup2(os.open(program.in_file, os.O_RDONLY), 0)
+
+                if program.output == IOType.FILE_OUT:
+                    os.dup2(os.open(program.out_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 1)
+                    
+                if program.output == IOType.PIPE_OUT:
+                    os.dup2(pipes[i][1], 1)
+
+                elif pipes[i][0] != -1:
+                    os.close(pipes[i][1])
+
+                if program.input == IOType.PIPE_IN:
+                    os.dup2(pipes[i-1][0], 0)
+
+                elif pipes[i-1][1] != -1:
+                    os.close(pipes[i-1][0])
+
+                #TODO: handle non-absolute paths and invalid commands
+                os.execve(program.cmd, program.args, env)
+
+            # parent
+            else:
+                if pipes[i][1] != -1:
+                    os.close(pipes[i][1])
+
+                if i > 0 and  pipes[i-1][0] != -1:
+                    os.close(pipes[i-1][0])
+
+                #TODO: handle background tasks
+                if program.output != IOType.PIPE_OUT:
+                    os.waitpid(rc, 0)
 
 if __name__ == "__main__":
     main()
